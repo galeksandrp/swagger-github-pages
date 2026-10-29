@@ -1,0 +1,1360 @@
+openapi: 3.0.3
+info:
+  title: API обмена сайта specmedtorg.ru с 1С
+  version: 1.0.0-draft
+  description: |
+    API модуля `specmed.api1c` для сайта на 1С-Битрикс.
+
+    Все запросы начинает 1С: забирает с сайта заказы и пользователей и записывает
+    изменения обратно. Сайт сам в 1С ничего не отправляет.
+
+    Общие правила:
+    - Ключ доступа передаётся в заголовке `X-Api-Key` в каждом запросе.
+    - Тело запросов и ответов — JSON в кодировке UTF-8.
+    - Даты — ISO 8601 со смещением, например `2026-11-02T14:30:00+03:00`.
+      Дата без смещения считается московским временем.
+    - Суммы — числа с двумя знаками после точки, валюта RUB.
+      Количество — число, до 4 знаков после точки.
+    - Каждый ответ содержит заголовок `X-Request-Id`. Указывайте его при обращении
+      в поддержку: по нему запрос находится в журнале.
+    - API не отправляет писем клиентам (кроме явного `notify_user` при создании пользователя).
+    - Лимиты: до 120 запросов в минуту на ключ, тело запроса до 5 МБ. После 10 неверных
+      ключей с одного адреса за 15 минут — 429 на 15 минут.
+
+    Ошибки приходят в одном формате (`Error`). Коды: `INVALID_JSON` (400),
+    `UNAUTHORIZED` (401), `FORBIDDEN` (403), `NOT_FOUND` (404), `VERSION_CONFLICT`,
+    `EMAIL_EXISTS`, `EXTERNAL_ID_EXISTS` (409), `VALIDATION_ERROR`, `PAYMENT_LOCKED`,
+    `ORDER_NOT_DELETABLE`, `TOO_MANY_ITEMS` (422), `ORDER_LOCKED` (423),
+    `RATE_LIMIT` (429, ждать `Retry-After` секунд), `INTERNAL_ERROR` (500).
+
+    Пункты, помеченные «Допущение», ещё не подтверждены заказчиком и могут измениться.
+servers:
+  - url: https://bx.fvds.specmedtorg.ru/api/1c/v1
+    description: Тестовый стенд. После запуска станет боевым сайтом.
+security:
+  - ApiKey: []
+tags:
+  - name: Служебные
+  - name: Справочники
+  - name: Пользователи
+  - name: Заказы
+
+paths:
+  /ping:
+    get:
+      tags: [Служебные]
+      summary: Проверка связи и ключа
+      operationId: ping
+      responses:
+        '200':
+          description: Ключ принят, API работает.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ping'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /dictionaries:
+    get:
+      tags: [Справочники]
+      summary: Справочники сайта
+      description: |
+        Статусы заказа и отгрузки, типы плательщиков, свойства заказа, службы доставки,
+        платёжные системы и группы пользователей, которые можно назначать через API.
+        Справочники меняются редко: достаточно запрашивать их раз в сутки и при ошибках
+        `VALIDATION_ERROR` с неизвестным кодом.
+      operationId: getDictionaries
+      responses:
+        '200':
+          description: Справочники.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dictionaries'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users:
+    get:
+      tags: [Пользователи]
+      summary: Список и поиск пользователей
+      operationId: listUsers
+      parameters:
+        - name: email
+          in: query
+          description: Точное совпадение email, без учёта регистра.
+          schema: {type: string}
+        - name: inn
+          in: query
+          description: ИНН компании. Допущение — у одного ИНН может быть несколько пользователей, поэтому ответ — список.
+          schema: {type: string}
+        - name: external_id
+          in: query
+          description: Идентификатор пользователя в 1С.
+          schema: {type: string}
+        - name: active
+          in: query
+          schema: {type: boolean}
+        - name: updated_from
+          in: query
+          schema: {type: string, format: date-time}
+        - name: updated_to
+          in: query
+          schema: {type: string, format: date-time}
+        - $ref: '#/components/parameters/Page'
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+      responses:
+        '200':
+          description: Пользователи, отсортированные по ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    post:
+      tags: [Пользователи]
+      summary: Создать пользователя
+      description: |
+        Логин пользователя равен email. Если пароль не передан, сайт создаёт случайный,
+        и пользователь задаёт свой через «Забыли пароль».
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreate'
+            example:
+              email: ivanova@example.ru
+              external_id: 8f1c2a7e-3b9d-11ef-a98f-00155d730a06
+              last_name: Иванова
+              name: Мария
+              phone: '+79161234567'
+              company:
+                name: ООО «Клиника Здоровье»
+                inn: '7701234567'
+                kpp: '770101001'
+                legal_address: 'г. Москва, ул. Лесная, д. 5'
+              address:
+                zip: '125047'
+                city: Москва
+                address: 'ул. Лесная, д. 5, офис 12'
+      responses:
+        '201':
+          description: Пользователь создан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /users/batch:
+    post:
+      tags: [Пользователи]
+      summary: Пакетная загрузка пользователей
+      description: |
+        До 200 пользователей за запрос. Каждый пользователь обрабатывается отдельно:
+        ошибка в одном не отменяет остальных. Ответ — 200, если запрос прочитан, даже если
+        часть пользователей не загрузилась; результат по каждому — в `results`.
+
+        Пользователь, найденный по `match_by`, обновляется переданными полями, остальные
+        создаются. Поэтому загрузку можно повторять: дублей не будет.
+
+        Пароль (`password` или `legacy_password`) для найденного пользователя меняется,
+        только пока он ещё не входил на новый сайт. Иначе пароль не трогается, а в
+        `warnings` приходит `PASSWORD_ALREADY_SET`.
+      operationId: batchUsers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserBatchRequest'
+            example:
+              match_by: email
+              users:
+                - email: petrov@example.ru
+                  last_name: Петров
+                  name: Сергей
+                  phone: '+79031112233'
+                  legacy_password:
+                    algo: md5
+                    hash: 5f4dcc3b5aa765d61d8327deb882cf99
+                - email: Info@Clinic-Zdorovie.ru
+                  company:
+                    name: ООО «Клиника Здоровье»
+                    inn: '7701234567'
+      responses:
+        '200':
+          description: Результат по каждому пользователю.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserBatchResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /users/{id}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [Пользователи]
+      summary: Пользователь по ID
+      operationId: getUser
+      responses:
+        '200':
+          description: Пользователь.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Пользователи]
+      summary: Изменить пользователя
+      description: |
+        Меняются только переданные поля. `null` очищает поле. Смена email меняет и логин.
+        Переданный `company` или `address` заменяет объект целиком.
+      operationId: updateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdate'
+            example:
+              phone: '+79167654321'
+              active: true
+      responses:
+        '200':
+          description: Пользователь после изменения.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Пользователи]
+      summary: Удалить или деактивировать пользователя
+      description: |
+        Пользователя с заказами сайт удалить не может: такой пользователь деактивируется
+        (не может войти, заказы сохраняются). Пользователь без заказов удаляется.
+        С `mode=deactivate` пользователь деактивируется всегда.
+      operationId: deleteUser
+      parameters:
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [auto, deactivate]
+            default: auto
+      responses:
+        '200':
+          description: Что сделано с пользователем.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDeleteResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /orders:
+    get:
+      tags: [Заказы]
+      summary: Заказы за период
+      description: |
+        Полные карточки заказов (с позициями, доставкой и оплатами), отсортированные по ID.
+        Для регулярного опроса удобнее `GET /orders/changes`: он отдаёт только новые и
+        изменённые заказы и не пропускает изменения между опросами.
+      operationId: listOrders
+      parameters:
+        - name: date_from
+          in: query
+          description: |
+            Начало периода. Обязателен, если не передан `external_id` или `number`.
+            Можно передать только дату (`2026-11-01`) — это начало суток по Москве.
+          schema: {type: string}
+          example: '2026-11-01T00:00:00+03:00'
+        - name: date_to
+          in: query
+          description: Конец периода включительно. По умолчанию — текущий момент. Только дата — конец суток.
+          schema: {type: string}
+        - name: date_field
+          in: query
+          description: По какой дате отбирать — создания или последнего изменения.
+          schema:
+            type: string
+            enum: [created, updated]
+            default: created
+        - name: status_id
+          in: query
+          description: Один или несколько кодов статуса заказа через запятую, например `N,P`.
+          schema: {type: string}
+        - name: user_id
+          in: query
+          schema: {type: integer}
+        - name: canceled
+          in: query
+          schema: {type: boolean}
+        - name: external_id
+          in: query
+          description: Найти заказ по идентификатору 1С.
+          schema: {type: string}
+        - name: number
+          in: query
+          description: Найти заказ по номеру на сайте.
+          schema: {type: string}
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/OrderLimit'
+      responses:
+        '200':
+          description: Заказы.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    post:
+      tags: [Заказы]
+      summary: Создать заказ
+      description: |
+        Создаёт заказ от имени существующего пользователя (сначала создайте пользователя,
+        если его нет). Номер заказа присваивает сайт. Цены записываются как переданы,
+        скидки сайта не применяются, остатки не проверяются.
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCreate'
+            example:
+              external_id: 0b6f3c1e-9a2d-11f0-a98f-00155d730a06
+              external_number: ЗК-000845
+              user_id: 154
+              person_type_id: 2
+              status_id: N
+              properties:
+                COMPANY: ООО «Клиника Здоровье»
+                INN: '7701234567'
+                CONTACT_PERSON: Иванова Мария
+                EMAIL: ivanova@example.ru
+                PHONE: '+79161234567'
+              items:
+                - xml_id: УТ000013791
+                  quantity: 10
+                  price: 1250.00
+                - name: Доставка до двери этажом выше
+                  quantity: 1
+                  price: 500.00
+                  measure: усл
+              delivery:
+                service_id: 1
+                price: 0
+      responses:
+        '201':
+          description: Заказ создан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderWriteResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /orders/changes:
+    get:
+      tags: [Заказы]
+      summary: Новые и изменённые заказы с прошлого опроса
+      description: |
+        Отдаёт заказы, изменённые после позиции `cursor`, в порядке изменения, и список
+        удалённых на сайте заказов.
+
+        Первый запрос — с `updated_from`. Дальше передавайте `cursor` из ответа.
+        Пока `has_more` = true, запрашивайте следующую страницу сразу. Когда `has_more` =
+        false, сохраните `next_cursor` и используйте его при следующем опросе.
+      operationId: listOrderChanges
+      parameters:
+        - name: cursor
+          in: query
+          description: Позиция из `next_cursor` прошлого ответа.
+          schema: {type: string}
+        - name: updated_from
+          in: query
+          description: Для первого запроса, когда курсора ещё нет.
+          schema: {type: string, format: date-time}
+        - name: skip_api_changes
+          in: query
+          description: Не отдавать заказы, последнее изменение которых сделано через API (то есть самой 1С).
+          schema: {type: boolean, default: false}
+        - $ref: '#/components/parameters/OrderLimit'
+      responses:
+        '200':
+          description: Изменения.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderChanges'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /orders/{id}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Заказы]
+      summary: Заказ по ID
+      operationId: getOrder
+      responses:
+        '200':
+          description: Заказ.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Заказы]
+      summary: Заменить заказ целиком
+      description: |
+        1С передаёт заказ в том виде, каким он должен стать. Сайт сам находит разницу
+        и применяет её одной операцией: либо целиком, либо никак. ID, номер, история,
+        оплаты и связь с клиентом сохраняются.
+
+        - `items` — итоговый состав. Позиции, которых нет в запросе, удаляются.
+        - Свойства, которых нет в `properties`, не меняются.
+        - Блоки `delivery` и `payments`, если не переданы, не меняются (кроме пересчёта
+          неоплаченной оплаты на новый остаток).
+        - Передайте `version` из последнего чтения: если заказ успел измениться на сайте,
+          придёт 409 `VERSION_CONFLICT`.
+      operationId: replaceOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderReplace'
+            example:
+              version: 7
+              external_id: 0b6f3c1e-9a2d-11f0-a98f-00155d730a06
+              status_id: P
+              items:
+                - id: 501
+                  quantity: 12
+                  price: 1200.00
+                - xml_id: УТ000004831
+                  quantity: 2
+                  price: 3400.00
+                - name: Переходник Луер-лок, поставка под заказ
+                  quantity: 5
+                  price: 150.00
+              delivery:
+                service_id: 1
+                price: 500.00
+                status_id: DA
+      responses:
+        '200':
+          description: Заказ после изменения.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderWriteResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '423':
+          $ref: '#/components/responses/Locked'
+    patch:
+      tags: [Заказы]
+      summary: Изменить часть заказа
+      description: |
+        Меняются только переданные поля верхнего уровня. Если передан `items`, он
+        заменяет весь состав, как в PUT. Удобно для смены статуса, отмены, трек-номера.
+      operationId: updateOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderPatch'
+            examples:
+              status:
+                summary: Сменить статус
+                value:
+                  version: 8
+                  status_id: F
+              cancel:
+                summary: Отменить заказ
+                value:
+                  version: 8
+                  canceled: true
+                  cancel_reason: Клиент отказался
+              tracking:
+                summary: Передан в доставку
+                value:
+                  version: 8
+                  delivery:
+                    status_id: DS
+                    allow_delivery: true
+                    tracking_number: '1234567890'
+      responses:
+        '200':
+          description: Заказ после изменения.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderWriteResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '423':
+          $ref: '#/components/responses/Locked'
+    delete:
+      tags: [Заказы]
+      summary: Удалить заказ
+      description: |
+        Для дублей и ошибочных заказов. Чтобы изменить заказ, используйте PUT, а не
+        удаление и повторное создание: при удалении теряются номер, история и оплаты.
+        Отгруженный заказ и заказ с онлайн-оплатой удалить нельзя (422 `ORDER_NOT_DELETABLE`).
+      operationId: deleteOrder
+      parameters:
+        - name: version
+          in: query
+          description: Версия из последнего чтения. Если заказ изменился — 409.
+          schema: {type: integer}
+      responses:
+        '200':
+          description: Заказ удалён.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, result]
+                properties:
+                  id: {type: integer, example: 1052}
+                  result: {type: string, enum: [deleted]}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '423':
+          $ref: '#/components/responses/Locked'
+
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        Ключ выдаётся в настройках модуля на сайте. На время отладки — тестовый ключ:
+        всё, что создано с ним, будет удалено перед запуском. Для работы — боевой ключ.
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      description: Номер страницы, с 1.
+      schema: {type: integer, minimum: 1, default: 1}
+    OrderLimit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+    UserId:
+      name: id
+      in: path
+      required: true
+      description: ID пользователя на сайте.
+      schema: {type: integer}
+    OrderId:
+      name: id
+      in: path
+      required: true
+      description: ID заказа на сайте.
+      schema: {type: integer}
+
+  responses:
+    Unauthorized:
+      description: Ключ не передан или неверен (`UNAUTHORIZED`).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Forbidden:
+      description: Операция запрещена, например изменение администратора или назначение служебной группы (`FORBIDDEN`).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: Объект не найден (`NOT_FOUND`).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Conflict:
+      description: |
+        Конфликт: `VERSION_CONFLICT` (заказ изменился после чтения, в `details` —
+        `current_version`), `EMAIL_EXISTS` или `EXTERNAL_ID_EXISTS` (в `details` —
+        `existing_id`).
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example:
+            error:
+              code: VERSION_CONFLICT
+              message: Заказ изменён на сайте после чтения. Перечитайте заказ и повторите запрос.
+              details:
+                - field: version
+                  message: Текущая версия 9
+                  current_version: 9
+              request_id: 7c1e0a4b2f9d4c3a
+    ValidationError:
+      description: Данные не прошли проверку (`VALIDATION_ERROR` и другие коды 422). В `details` — поле и причина.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Ошибка в данных запроса
+              details:
+                - field: items[2].price
+                  message: Цена не может быть отрицательной
+              request_id: 9a0b1c2d3e4f5a6b
+    Locked:
+      description: Заказ сейчас открыт на редактирование менеджером в админке (`ORDER_LOCKED`). Повторите позже.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorBody'
+    ErrorBody:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          description: Код ошибки. Список — в описании API.
+          example: VALIDATION_ERROR
+        message:
+          type: string
+          description: Текст для человека, на русском.
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field: {type: string, example: 'items[0].quantity'}
+              message: {type: string}
+            additionalProperties: true
+        request_id: {type: string}
+
+    Warning:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [PRODUCT_NOT_FOUND, PASSWORD_ALREADY_SET, PAYMENT_ADJUSTED]
+        message: {type: string}
+        field: {type: string, example: 'items[2].xml_id'}
+
+    Pagination:
+      type: object
+      required: [page, limit, total, pages]
+      properties:
+        page: {type: integer, example: 1}
+        limit: {type: integer, example: 50}
+        total: {type: integer, example: 134}
+        pages: {type: integer, example: 3}
+
+    Ping:
+      type: object
+      properties:
+        status: {type: string, enum: [ok]}
+        api_version: {type: string, example: 1.0.0}
+        server_time: {type: string, format: date-time}
+        key_type:
+          type: string
+          enum: [test, production]
+
+    DictItem:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+        name: {type: string}
+
+    Dictionaries:
+      type: object
+      properties:
+        currency: {type: string, example: RUB}
+        timezone: {type: string, example: Europe/Moscow}
+        order_statuses:
+          type: array
+          description: Статусы заказа (поле `status_id` заказа).
+          items: {$ref: '#/components/schemas/DictItem'}
+          example:
+            - {id: N, name: 'Принят, ожидается оплата'}
+            - {id: P, name: 'Оплачен, формируется к отправке'}
+            - {id: F, name: Выполнен}
+        shipment_statuses:
+          type: array
+          description: Статусы отгрузки (поле `delivery.status_id`).
+          items: {$ref: '#/components/schemas/DictItem'}
+          example:
+            - {id: DN, name: Ожидает обработки}
+            - {id: DA, name: Комплектация заказа}
+            - {id: DG, name: Ожидаем приход товара}
+            - {id: DT, name: Ожидаем забора транспортной компанией}
+            - {id: DS, name: Передан в службу доставки}
+            - {id: DF, name: Отгружен}
+        person_types:
+          type: array
+          items: {$ref: '#/components/schemas/DictItem'}
+          example:
+            - {id: 1, name: Физическое лицо}
+            - {id: 2, name: Юридическое лицо}
+        order_properties:
+          type: array
+          items: {$ref: '#/components/schemas/OrderPropertyDef'}
+        delivery_services:
+          type: array
+          items: {$ref: '#/components/schemas/DictItem'}
+          example:
+            - {id: 1, name: Доставка курьером}
+            - {id: 2, name: Самовывоз}
+            - {id: 7, name: Без доставки}
+        pay_systems:
+          type: array
+          items: {$ref: '#/components/schemas/DictItem'}
+          example:
+            - {id: 1, name: Наличные курьеру}
+            - {id: 3, name: Банковские карты}
+            - {id: 6, name: Внутренний счет}
+        user_groups:
+          type: array
+          description: Группы, которые можно назначать через API.
+          items: {$ref: '#/components/schemas/DictItem'}
+          example:
+            - {id: 6, name: Зарегистрированные пользователи}
+
+    OrderPropertyDef:
+      type: object
+      properties:
+        code: {type: string, example: INN}
+        name: {type: string, example: ИНН}
+        person_type_id: {type: integer, example: 2}
+        type:
+          type: string
+          enum: [string, location]
+        required: {type: boolean}
+
+    Company:
+      type: object
+      nullable: true
+      description: Реквизиты компании. Для физических лиц — null.
+      properties:
+        name: {type: string, maxLength: 255}
+        inn:
+          type: string
+          pattern: '^(\d{10}|\d{12})$'
+        kpp:
+          type: string
+          pattern: '^\d{9}$'
+        legal_address: {type: string}
+
+    Address:
+      type: object
+      nullable: true
+      description: Адрес доставки по умолчанию, подставляется при оформлении заказа.
+      properties:
+        zip: {type: string}
+        city: {type: string}
+        address: {type: string}
+
+    LegacyPassword:
+      type: object
+      description: |
+        Пароль со старого сайта в том виде, в каком он там хранится. Сайт проверит его
+        при первом входе пользователя и заменит обычным паролем.
+        Допущение — точный список алгоритмов и порядок соли уточняются после анализа
+        старого сайта.
+      required: [algo]
+      properties:
+        algo:
+          type: string
+          enum: [plain, md5, sha1, sha256, bcrypt]
+          description: '`plain` — пароль в открытом виде, сразу становится паролем на сайте.'
+        hash:
+          type: string
+          description: Хеш. Для `plain` — сам пароль.
+        salt:
+          type: string
+        salt_position:
+          type: string
+          enum: [before, after]
+          default: before
+          description: Соль перед паролем или после него.
+
+    UserFields:
+      type: object
+      properties:
+        external_id:
+          type: string
+          nullable: true
+          maxLength: 255
+          description: Идентификатор пользователя в 1С (например, GUID контрагента).
+        active: {type: boolean}
+        last_name: {type: string, maxLength: 50}
+        name: {type: string, maxLength: 50}
+        second_name: {type: string, maxLength: 50}
+        phone:
+          type: string
+          nullable: true
+          description: Телефон в любом виде, сайт хранит как передан.
+        company: {$ref: '#/components/schemas/Company'}
+        address: {$ref: '#/components/schemas/Address'}
+        groups:
+          type: array
+          description: ID групп из `user_groups` справочника. По умолчанию — «Зарегистрированные пользователи».
+          items: {type: integer}
+
+    UserCreate:
+      allOf:
+        - $ref: '#/components/schemas/UserFields'
+        - type: object
+          required: [email]
+          properties:
+            email:
+              type: string
+              format: email
+              maxLength: 50
+              description: Он же логин. Уникален. Не длиннее 50 символов — ограничение логина в Битриксе.
+            password:
+              type: string
+              minLength: 6
+              writeOnly: true
+            legacy_password: {$ref: '#/components/schemas/LegacyPassword'}
+            notify_user:
+              type: boolean
+              default: false
+              description: Отправить пользователю стандартное письмо с данными для входа.
+
+    UserUpdate:
+      allOf:
+        - $ref: '#/components/schemas/UserFields'
+        - type: object
+          properties:
+            email:
+              type: string
+              format: email
+              maxLength: 50
+            password:
+              type: string
+              minLength: 6
+              writeOnly: true
+
+    User:
+      type: object
+      required: [id, email, login, active]
+      properties:
+        id: {type: integer, example: 154}
+        external_id: {type: string, nullable: true}
+        email: {type: string, example: ivanova@example.ru}
+        login: {type: string, example: ivanova@example.ru}
+        active: {type: boolean}
+        last_name: {type: string}
+        name: {type: string}
+        second_name: {type: string}
+        phone: {type: string, nullable: true}
+        company: {$ref: '#/components/schemas/Company'}
+        address: {$ref: '#/components/schemas/Address'}
+        groups:
+          type: array
+          items: {type: integer}
+        has_orders: {type: boolean}
+        legacy_password_pending:
+          type: boolean
+          description: true — пароль со старого сайта ещё не перенесён (пользователь не входил).
+        date_register: {type: string, format: date-time}
+        date_updated: {type: string, format: date-time}
+        last_login: {type: string, format: date-time, nullable: true}
+
+    UserList:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/User'}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+
+    UserBatchRequest:
+      type: object
+      required: [users]
+      properties:
+        match_by:
+          type: string
+          enum: [email, external_id]
+          default: email
+          description: По какому полю искать существующего пользователя.
+        users:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: {$ref: '#/components/schemas/UserCreate'}
+
+    UserBatchResponse:
+      type: object
+      required: [summary, results]
+      properties:
+        summary:
+          type: object
+          properties:
+            total: {type: integer, example: 200}
+            created: {type: integer, example: 187}
+            updated: {type: integer, example: 10}
+            failed: {type: integer, example: 3}
+        results:
+          type: array
+          items:
+            type: object
+            required: [index, status]
+            properties:
+              index:
+                type: integer
+                description: Номер пользователя в запросе, с 0.
+              email: {type: string}
+              status:
+                type: string
+                enum: [created, updated, failed]
+              id:
+                type: integer
+                description: ID на сайте, если создан или обновлён.
+              warnings:
+                type: array
+                items: {$ref: '#/components/schemas/Warning'}
+              error: {$ref: '#/components/schemas/ErrorBody'}
+          example:
+            - {index: 0, email: petrov@example.ru, status: created, id: 1201}
+            - {index: 1, email: info@clinic-zdorovie.ru, status: updated, id: 154}
+            - index: 2
+              email: 'bad@'
+              status: failed
+              error:
+                code: VALIDATION_ERROR
+                message: Некорректный email
+                request_id: 9a0b1c2d3e4f5a6b
+
+    UserDeleteResult:
+      type: object
+      required: [id, result]
+      properties:
+        id: {type: integer}
+        result:
+          type: string
+          enum: [deleted, deactivated]
+        reason:
+          type: string
+          enum: [HAS_ORDERS, REQUESTED]
+          description: Почему деактивирован, а не удалён.
+
+    OrderItem:
+      type: object
+      required: [id, type, name, quantity, price, sum]
+      properties:
+        id:
+          type: integer
+          description: ID позиции в заказе. Передавайте его в PUT, чтобы изменить эту позицию.
+          example: 501
+        type:
+          type: string
+          enum: [product, text]
+          description: '`product` — товар из каталога сайта, `text` — позиция без карточки на сайте.'
+        product_id:
+          type: integer
+          nullable: true
+          description: ID товара на сайте. Для `text` — null.
+        xml_id:
+          type: string
+          nullable: true
+          description: |
+            Код товара 1С, например `УТ000013791`. У торгового предложения —
+            `код#GUID характеристики`, например `УТ000011166#e533d5aa-8957-11f0-a98f-00155d730a06`.
+        article: {type: string, nullable: true}
+        name: {type: string, maxLength: 255}
+        quantity: {type: number, example: 10}
+        measure: {type: string, example: шт}
+        price:
+          type: number
+          description: Цена за единицу с учётом скидки.
+          example: 1250.00
+        base_price:
+          type: number
+          description: Цена до скидки.
+          example: 1300.00
+        vat_rate:
+          type: number
+          nullable: true
+          description: Ставка НДС в процентах; null — без НДС.
+          example: 20
+        vat_included: {type: boolean}
+        sum: {type: number, example: 12500.00}
+
+    OrderItemInput:
+      type: object
+      required: [quantity, price]
+      description: |
+        Как сайт понимает позицию:
+        1. Есть `id` — меняется эта позиция заказа.
+        2. Нет `id`, есть `xml_id` и товар с таким кодом есть на сайте — позиция-товар.
+        3. Иначе — позиция текстом: нужен `name`. Если передан `xml_id`, которого нет на
+           сайте, он сохраняется в позиции, а в ответе приходит предупреждение `PRODUCT_NOT_FOUND`.
+      properties:
+        id: {type: integer}
+        xml_id: {type: string, maxLength: 100}
+        name:
+          type: string
+          maxLength: 255
+          description: Обязательно для позиции текстом. Для товара по умолчанию — название из каталога.
+        quantity:
+          type: number
+          exclusiveMinimum: true
+          minimum: 0
+        price:
+          type: number
+          minimum: 0
+          description: Цена за единицу. Записывается как есть, сайт её не пересчитывает.
+        measure:
+          type: string
+          maxLength: 50
+          default: шт
+        vat_rate:
+          type: number
+          nullable: true
+
+    OrderDelivery:
+      type: object
+      properties:
+        service_id: {type: integer, example: 1}
+        service_name: {type: string, example: Доставка курьером}
+        price: {type: number, example: 500.00}
+        status:
+          $ref: '#/components/schemas/DictItem'
+        allow_delivery: {type: boolean}
+        shipped: {type: boolean}
+        date_shipped: {type: string, format: date-time, nullable: true}
+        tracking_number: {type: string, nullable: true}
+
+    OrderDeliveryInput:
+      type: object
+      properties:
+        service_id: {type: integer}
+        price: {type: number, minimum: 0}
+        status_id:
+          type: string
+          description: Код из `shipment_statuses`.
+        allow_delivery: {type: boolean}
+        shipped: {type: boolean}
+        tracking_number: {type: string, nullable: true, maxLength: 255}
+
+    OrderPayment:
+      type: object
+      properties:
+        id: {type: integer}
+        pay_system_id: {type: integer}
+        pay_system_name: {type: string}
+        sum: {type: number}
+        paid: {type: boolean}
+        date_paid: {type: string, format: date-time, nullable: true}
+        online:
+          type: boolean
+          description: Оплачено онлайн на сайте. Такую оплату нельзя изменить или удалить через API.
+
+    OrderPaymentInput:
+      type: object
+      required: [pay_system_id, sum]
+      properties:
+        id:
+          type: integer
+          description: ID существующей оплаты.
+        pay_system_id: {type: integer}
+        sum: {type: number, minimum: 0}
+        paid: {type: boolean, default: false}
+        date_paid: {type: string, format: date-time}
+
+    OrderTotals:
+      type: object
+      properties:
+        items_sum: {type: number, description: Сумма позиций.}
+        delivery_price: {type: number}
+        discount_sum: {type: number, description: Разница между ценой до скидки и ценой по всем позициям.}
+        total: {type: number, description: Итого к оплате.}
+        paid_sum: {type: number}
+        due_sum:
+          type: number
+          description: Остаток к оплате, total − paid_sum. Отрицательный — переплата.
+
+    Order:
+      type: object
+      required: [id, number, version, status, items, totals]
+      properties:
+        id: {type: integer, example: 1052}
+        number:
+          type: string
+          description: Номер заказа на сайте, его видит клиент.
+          example: '1052'
+        version:
+          type: integer
+          description: Растёт при каждом сохранении заказа. Передавайте в запросах на изменение.
+          example: 7
+        external_id:
+          type: string
+          nullable: true
+          maxLength: 36
+          description: Идентификатор документа в 1С (GUID).
+        external_number:
+          type: string
+          nullable: true
+          description: Номер документа в 1С.
+        date_created: {type: string, format: date-time}
+        date_updated: {type: string, format: date-time}
+        status:
+          $ref: '#/components/schemas/DictItem'
+        date_status: {type: string, format: date-time}
+        canceled: {type: boolean}
+        cancel_reason: {type: string, nullable: true}
+        date_canceled: {type: string, format: date-time, nullable: true}
+        paid:
+          type: boolean
+          description: Заказ оплачен полностью.
+        person_type:
+          $ref: '#/components/schemas/DictItem'
+        user:
+          type: object
+          properties:
+            id: {type: integer}
+            email: {type: string}
+            name: {type: string}
+        properties:
+          type: object
+          description: |
+            Свойства заказа: код → значение. Коды — из `order_properties` справочника.
+            `LOCATION` — код местоположения Битрикса; город и адрес — текстом в `CITY` и `ADDRESS`.
+          additionalProperties:
+            type: string
+            nullable: true
+          example:
+            FIO: Петров Сергей
+            EMAIL: petrov@example.ru
+            PHONE: '+79031112233'
+            CITY: Москва
+            ADDRESS: 'ул. Лесная, д. 5'
+        comment_customer:
+          type: string
+          nullable: true
+          description: Комментарий покупателя при оформлении.
+        comment_manager:
+          type: string
+          nullable: true
+          description: Комментарий менеджера, клиент его не видит.
+        currency: {type: string, example: RUB}
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/OrderItem'}
+        delivery: {$ref: '#/components/schemas/OrderDelivery'}
+        payments:
+          type: array
+          items: {$ref: '#/components/schemas/OrderPayment'}
+        totals: {$ref: '#/components/schemas/OrderTotals'}
+        source:
+          type: string
+          enum: [site, api]
+          description: Где создан заказ.
+        last_change_source:
+          type: string
+          enum: [site, api]
+          description: Кто изменил заказ последним — сайт (клиент, менеджер, оплата) или API.
+        admin_url:
+          type: string
+          description: Ссылка на заказ в админке сайта.
+
+    OrderWritable:
+      type: object
+      properties:
+        external_id: {type: string, maxLength: 36}
+        external_number: {type: string, maxLength: 100}
+        status_id:
+          type: string
+          description: Код из `order_statuses`.
+        properties:
+          type: object
+          additionalProperties:
+            type: string
+            nullable: true
+        comment_customer: {type: string, nullable: true}
+        comment_manager: {type: string, nullable: true}
+        delivery: {$ref: '#/components/schemas/OrderDeliveryInput'}
+        payments:
+          type: array
+          description: |
+            Если передан — итоговый список оплат. Онлайн-оплаты (`online` = true) нужно
+            передать с их `id` без изменений, иначе 422 `PAYMENT_LOCKED`.
+            Если не передан — неоплаченная оплата пересчитывается на остаток к оплате.
+          items: {$ref: '#/components/schemas/OrderPaymentInput'}
+        canceled:
+          type: boolean
+          description: |
+            true — отменить заказ. Отменённый заказ меняется только вместе со снятием
+            отмены: передайте `canceled: false` в том же запросе.
+        cancel_reason: {type: string, maxLength: 255}
+
+    OrderCreate:
+      allOf:
+        - $ref: '#/components/schemas/OrderWritable'
+        - type: object
+          required: [user_id, person_type_id, items]
+          properties:
+            user_id: {type: integer}
+            person_type_id:
+              type: integer
+              description: Тип плательщика. После создания не меняется.
+            items:
+              type: array
+              minItems: 1
+              items: {$ref: '#/components/schemas/OrderItemInput'}
+
+    OrderReplace:
+      allOf:
+        - $ref: '#/components/schemas/OrderWritable'
+        - type: object
+          required: [items]
+          properties:
+            version:
+              type: integer
+              description: Версия из последнего чтения. Без неё заказ перезаписывается без проверки.
+            user_id:
+              type: integer
+              description: Перепривязать заказ к другому пользователю.
+            items:
+              type: array
+              minItems: 1
+              items: {$ref: '#/components/schemas/OrderItemInput'}
+
+    OrderPatch:
+      allOf:
+        - $ref: '#/components/schemas/OrderWritable'
+        - type: object
+          properties:
+            version: {type: integer}
+            user_id: {type: integer}
+            items:
+              type: array
+              minItems: 1
+              items: {$ref: '#/components/schemas/OrderItemInput'}
+
+    OrderWriteResult:
+      type: object
+      required: [order]
+      properties:
+        order: {$ref: '#/components/schemas/Order'}
+        warnings:
+          type: array
+          items: {$ref: '#/components/schemas/Warning'}
+
+    OrderList:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Order'}
+        pagination: {$ref: '#/components/schemas/Pagination'}
+
+    OrderChanges:
+      type: object
+      required: [items, deleted, next_cursor, has_more]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/Order'}
+        deleted:
+          type: array
+          description: Заказы, удалённые на сайте за этот промежуток.
+          items:
+            type: object
+            properties:
+              id: {type: integer}
+              number: {type: string}
+              external_id: {type: string, nullable: true}
+              date_deleted: {type: string, format: date-time}
+        next_cursor:
+          type: string
+          description: Позиция для следующего запроса.
+        has_more:
+          type: boolean
+          description: true — есть ещё изменения, запросите следующую страницу сразу.

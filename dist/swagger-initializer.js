@@ -16,8 +16,9 @@ atol-dev-fptr-web-server-10.9.3.1-swagger.yaml
 atol-dev-fptr-web-server-10.9.4.0-swagger.yaml
 atol-dev-fptr-web-server-10.9.4.X-swagger.yaml
 eofd-e-ofd_client_web_api-1.07-swagger.yaml
-stavtrack-online-2025-12-11/api-docs.json
+openapi.yaml
 stavtrack-online-2025-12-11/Authorization Service API.yaml
+stavtrack-online-2025-12-11/api-docs.json
 stavtrack-online-2025-12-11/User Server API.yaml
 swagger.yaml
 `
